@@ -1,10 +1,16 @@
-import random
-from itertools import repeat, chain
-
+import os
 import sys
+import time
+from itertools import repeat, chain
 from enum import Enum
 from random import shuffle, sample
 from io import StringIO
+
+
+def clear_screen():
+    # os.system('clear')
+    # print('\x1b[2J\x1b[3J')
+    print("\033[H\033[J")
 
 
 class Suit(Enum):
@@ -145,10 +151,14 @@ class Move:
         card_being_moved = self.from_stack.top_card
         destination = self.to_stack.top_card
         if destination is None:
-            destination = '%s@%x' % (self.to_stack.__class__.__name__, id(self.to_stack))
-        self.description = f"{card_being_moved}->{destination}"
+            # destination = '%s@%x' % (self.to_stack.__class__.__name__, id(self.to_stack))
+            destination = self.to_stack.__class__.__name__
+        self.description = f"{card_being_moved}>{destination}"
 
     def __str__(self):
+        return self.description
+
+    def __repr__(self):
         return self.description
 
 
@@ -160,11 +170,15 @@ class Board(object):
         self.move_history = []
 
     def all_valid_moves(self):
-        for from_stack in chain(self.source_stacks, self.free_cells):
+        for from_stack in chain(self.free_cells, self.source_stacks):
             top_card = from_stack.top_card
             if top_card is None:
                 continue
-            for to_stack in chain(self.home_stacks, self.source_stacks, self.free_cells):
+            if isinstance(from_stack, FreeCell):
+                to_stacks = chain(self.home_stacks, self.source_stacks)
+            else:
+                to_stacks = chain(self.home_stacks, self.source_stacks, self.free_cells)
+            for to_stack in to_stacks:
                 if from_stack is to_stack:
                     continue
                 if to_stack.can_accept_card(top_card):
@@ -188,7 +202,7 @@ class Board(object):
                 and all(fs.top_card is None for fs in self.free_cells)
                 and all(ss.top_card is None for ss in self.source_stacks))
 
-    def __hash__(self):
+    def __hash__(self):  # make order of freecells and homecells unimportant
         with StringIO() as out:
             save_game(out, self)
             out.seek(0)
@@ -238,6 +252,9 @@ def random_search(board):
                 print('Game is solved yippee! (after', attempt, 'attempts')
                 break
 
+        print('Move history:')
+        print(" ".join(board.move_history))
+
         if solved:
             break
         else:
@@ -247,44 +264,92 @@ def random_search(board):
                 print_game(board)
 
 
-boards_seen = set()
+def sort_moves_by_priority(moves):
+    def key_fn(move):
+        if isinstance(move.to_stack, HomeStack):
+            return 0
+        elif isinstance(move.to_stack, SourceStack):
+            return 1
+        elif isinstance(move.to_stack, FreeCell):
+            return 2
+    return sorted(moves, key=key_fn)
 
 
-def full_recursive_search(board, depth_remaining=200):
-    if depth_remaining <= 0:
-        return
-    moves = list(board.all_valid_moves())
+def filter_redundant_moves(moves):
+    equivalency_set = set()
     for move in moves:
+        equivalency_key = "|".join([
+            move.from_stack.__class__.__name__,
+            str(move.from_stack.top_card),
+            move.to_stack.__class__.__name__,
+            str(move.to_stack.top_card)])
+
+        if equivalency_key not in equivalency_set:
+            equivalency_set.add(equivalency_key)
+            yield move
+
+
+boards_seen = dict()
+
+lookback_distance_histogram = dict()
+
+next_print = 0
+
+
+def full_recursive_search(board, depth_remaining=100):
+    if depth_remaining < 0:
+        return
+
+    global next_print
+    global max_lookback_distance
+    now = time.time()
+    if next_print == 0 or now >= next_print:
+        next_print = now + 1
+        clear_screen()
+        print('Depth remaining:', depth_remaining)
+        print('Number of boards seen:', len(boards_seen))
+        #print('Max lookback distance:', max_lookback_distance)
         print_game(board)
+        print(" ".join(map(str, board.move_history)))
+        print("Lookback distance histogram:", sorted(list(lookback_distance_histogram.items())))
+
+    moves = sort_moves_by_priority(list(board.all_valid_moves()))
+    moves = list(filter_redundant_moves(moves))  # grab whole list just for debugging
+    for move in moves:
+        # print_game(board)
         board.make_move(move)
-        print(move)
-        print_game(board)
+        # print(move)
+        # print_game(board)
         if board.is_solved:
             return
         hash_value = hash(board)
-        if hash_value in boards_seen:
-            board.undo_last_move()
-        else:
-            boards_seen.add(hash_value)
+        board_seen_at = boards_seen.get(hash_value)
+        if board_seen_at is None:
+            boards_seen[hash_value] = len(boards_seen)
             full_recursive_search(board, depth_remaining - 1)
             if board.is_solved:
                 return
-            board.undo_last_move()
+        else:
+            lookback_distance = len(boards_seen) - board_seen_at
+            #max_lookback_distance = max(lookback_distance, max_lookback_distance)
+            lookback_distance_histogram[lookback_distance] = lookback_distance_histogram.get(lookback_distance, 0) + 1
+        board.undo_last_move()
+
+
+test_game = """
+6C 6H TH 6S JD 9H QH 5H
+KC 5D AD JC 8S TS 8D 2H
+4D QD 7H KD 3S 4S 2D JS
+JH 9C TC 8H 5S AH 6D 2S
+KH 7C QC AS 7D TD 2C 5C
+3H 9S 4C 7S KS QS 9D AC
+3D 3C 8C 4H
+"""
 
 
 def main():
     deck = Deck()
     print(deck.cards)
-
-    test_game = """
-    6C 6H TH 6S JD 9H QH 5H
-    KC 5D AD JC 8S TS 8D 2H
-    4D QD 7H KD 3S 4S 2D JS
-    JH 9C TC 8H 5S AH 6D 2S
-    KH 7C QC AS 7D TD 2C 5C
-    3H 9S 4C 7S KS QS 9D AC
-    3D 3C 8C 4H 
-    """
 
     input = StringIO(test_game)
     board = load_game(input)
@@ -306,10 +371,12 @@ def main():
     # random_search(board)
 
     full_recursive_search(board)
-    
+
     if board.is_solved:
         print('Board is solved and here are the moves:')
-        print(board.move_history)
+        # print(board.move_history)
+        print(" ".join(map(str, board.move_history)))
+        # print(" ".join(board.move_history))
 
 
 if __name__ == '__main__':
